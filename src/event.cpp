@@ -1,5 +1,7 @@
 #include "event.h"
 #include "types.h"
+#include <uv.h>
+#include <iostream>
 
 namespace opencl {
 
@@ -42,7 +44,6 @@ NAN_METHOD(GetEventInfo) {
     {
       cl_command_queue val;
       CHECK_ERR(::clGetEventInfo(ev->getRaw(),param_name,sizeof(cl_command_queue), &val, NULL))
-      CHECK_ERR(::clRetainCommandQueue(val))
       info.GetReturnValue().Set(NOCL_WRAP(NoCLCommandQueue, val));
       return;
     }
@@ -50,7 +51,6 @@ NAN_METHOD(GetEventInfo) {
     {
       cl_context val;
       CHECK_ERR(::clGetEventInfo(ev->getRaw(),param_name,sizeof(cl_context), &val, NULL))
-      CHECK_ERR(::clRetainContext(val))
       info.GetReturnValue().Set(NOCL_WRAP(NoCLContext, val));
       return;
     }
@@ -227,10 +227,19 @@ protected:
    int mCLCallbackStatus = 0;
 };
 
+void mycb(uv_async_t* handle) {
+	Nan::HandleScope scope;
+	Nan::Callback* cb = (Nan::Callback*) handle->data;
+	cb->Call(0, 0);
+	uv_close((uv_handle_t*) handle, [](uv_handle_t* handle) {
+			free(handle);
+	});
+	delete cb;
+}
+
 void CL_CALLBACK notifyCB (cl_event event, cl_int event_command_exec_status, void *user_data) {
-  NoCLEventWorker* asyncCB = static_cast<NoCLEventWorker*>(user_data);
-  asyncCB->CallBackIsDone(event_command_exec_status);
-  AsyncQueueWorker(asyncCB);
+  uv_async_t* handle = (uv_async_t*) user_data;
+  uv_async_send(handle);
 }
 
 NAN_METHOD(SetEventCallback)
@@ -241,10 +250,12 @@ NAN_METHOD(SetEventCallback)
   cl_int callbackStatusType = info[1]->Int32Value();
   Nan::Callback *callback = new Nan::Callback(info[2].As<v8::Function>());
   Local<Object> userData = info[3].As<Object>();
+  
+  uv_async_t* handle = (uv_async_t*) malloc(sizeof(uv_async_t));
+  uv_async_init(uv_default_loop(), handle, mycb);
+  handle->data = callback;
 
-  NoCLEventWorker* asyncCB = new NoCLEventWorker(callback,userData,info[0].As<Object>());
-
-  CHECK_ERR(clSetEventCallback(event->getRaw(),callbackStatusType,notifyCB,asyncCB));
+  CHECK_ERR(clSetEventCallback(event->getRaw(),callbackStatusType,notifyCB,handle));
 
   info.GetReturnValue().Set(JS_INT(CL_SUCCESS));
 }
